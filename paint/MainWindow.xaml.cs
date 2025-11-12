@@ -13,7 +13,7 @@ namespace paint
 {
     public partial class MainWindow : Window
     {
-        enum Tool { Pencil, Line, Rectangle, Ellipse, Eraser }
+        enum Tool { Pencil, Line, Rectangle, Ellipse, Eraser, Select }
         Tool currentTool = Tool.Pencil;
         Shape currentShape;
         Polyline currentLine;
@@ -25,13 +25,31 @@ namespace paint
         private WriteableBitmap originalCanvasBitmap = null;
         private bool filterActive = false;
 
+        private Stack<WriteableBitmap> undoStack = new Stack<WriteableBitmap>();
+        private Stack<WriteableBitmap> redoStack = new Stack<WriteableBitmap>();
+
+        // Для выделения
+        private Rectangle selectionRect;
+        private bool isSelecting = false;
+        private Point selectionStartPoint;
+        private Rect selectionRectangle;
 
         public MainWindow()
         {
             InitializeComponent();
             brushSizeSlider.ValueChanged += BrushSizeSlider_ValueChanged;
             InitializeColorPalette();
-            UpdateStatus();
+
+            Loaded += (s, e) => {
+                undoStack.Push(GetCanvasBitmap());
+            };
+
+            this.KeyDown += Window_KeyDown;
+
+            // Обработчики для выделения
+            drawingCanvas.MouseLeftButtonDown += DrawingCanvas_MouseLeftButtonDown_ForSelection;
+            drawingCanvas.MouseMove += DrawingCanvas_MouseMove_ForSelection;
+            drawingCanvas.MouseLeftButtonUp += DrawingCanvas_MouseLeftButtonUp_ForSelection;
         }
 
         void InitializeColorPalette()
@@ -39,45 +57,166 @@ namespace paint
             colorPalette.ItemsSource = new Color[] { Colors.Black, Colors.White, Colors.Red, Colors.Green, Colors.Blue, Colors.Yellow };
         }
 
-        private void RotateCanvas_Click(object sender, RoutedEventArgs e)
-        {
-            canvasAngle = (canvasAngle + 90) % 360;
-            drawingCanvas.RenderTransform = CreateTransform(canvasAngle);
-        }
+        // --- Основные функции для обрезки и выделения ---
 
-        private Transform CreateTransform(double angle)
+        private void DrawingCanvas_MouseLeftButtonDown_ForSelection(object sender, MouseButtonEventArgs e)
         {
-            FrameworkElement parent = drawingCanvas.Parent as FrameworkElement;
-            double w = drawingCanvas.ActualWidth, h = drawingCanvas.ActualHeight;
-            double rotatedWidth = (angle % 180 == 0) ? w : h;
-            double rotatedHeight = (angle % 180 == 0) ? h : w;
-            double scaleX = parent.ActualWidth / rotatedWidth;
-            double scaleY = parent.ActualHeight / rotatedHeight;
-            double scale = scaleX < scaleY ? scaleX : scaleY;
-            TransformGroup tg = new TransformGroup();
-            tg.Children.Add(new ScaleTransform(scale, scale, w / 2, h / 2));
-            tg.Children.Add(new RotateTransform(angle, w / 2, h / 2));
-            return tg;
-        }
-
-        private void ToolComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (toolComboBox.SelectedIndex >= 0)
+            selectionRect = new Rectangle
             {
-                currentTool = (Tool)toolComboBox.SelectedIndex;
-                UpdateStatus();
+                Stroke = Brushes.Blue,
+                StrokeThickness = 1,
+                Fill = new SolidColorBrush(Color.FromArgb(50, 0, 0, 255))
+            };
+
+            Rect selectionRectangle = new Rect(
+            Canvas.GetLeft(selectionRect),
+            Canvas.GetTop(selectionRect),
+            selectionRect.Width,
+            selectionRect.Height);
+
+            Canvas.SetLeft(selectionRect, selectionStartPoint.X);
+            Canvas.SetTop(selectionRect, selectionStartPoint.Y);
+            drawingCanvas.Children.Add(selectionRect);
+
+            if (currentTool == Tool.Select)
+            {
+                selectionStartPoint = e.GetPosition(drawingCanvas);
+                isSelecting = true;
+
+                // Удалить прежний rect с Canvas, если он есть:
+                if (selectionRect != null)
+                {
+                    drawingCanvas.Children.Remove(selectionRect);
+                }
+
+                // Создаём новый rect (единственный):
+                selectionRect = new Rectangle
+                {
+                    Stroke = Brushes.Black,
+                    StrokeThickness = 1
+                };
+                Canvas.SetLeft(selectionRect, selectionStartPoint.X);
+                Canvas.SetTop(selectionRect, selectionStartPoint.Y);
+                drawingCanvas.Children.Add(selectionRect);
+                return;
+            }
+            else
+            {
+                // Остальные инструменты
+                Point p = e.GetPosition(drawingCanvas);
+                isDrawing = true;
+                if (currentTool == Tool.Pencil)
+                {
+                    currentLine = new Polyline { Stroke = new SolidColorBrush(currentColor), StrokeThickness = brushSize, StrokeLineJoin = PenLineJoin.Round };
+                    points.Clear(); points.Add(p); currentLine.Points = new PointCollection(points); drawingCanvas.Children.Add(currentLine);
+                }
+                else if (currentTool == Tool.Eraser)
+                {
+                    RemoveAtPoint(p);
+                    PushUndo();
+                }
+                else
+                    CreateShape(p);
             }
         }
-        private void ColorRectangle_MouseDown(object sender, MouseButtonEventArgs e)
+
+        private void DrawingCanvas_MouseMove_ForSelection(object sender, MouseEventArgs e)
         {
-            Rectangle r = sender as Rectangle;
-            if (r != null && r.Fill is SolidColorBrush)
-                currentColor = ((SolidColorBrush)r.Fill).Color;
+            if (isSelecting && selectionRect != null)
+            {
+                Point p = e.GetPosition(drawingCanvas);
+                double x = Math.Min(p.X, selectionStartPoint.X);
+                double y = Math.Min(p.Y, selectionStartPoint.Y);
+                double w = Math.Abs(p.X - selectionStartPoint.X);
+                double h = Math.Abs(p.Y - selectionStartPoint.Y);
+                Canvas.SetLeft(selectionRect, x);
+                Canvas.SetTop(selectionRect, y);
+                selectionRect.Width = w;
+                selectionRect.Height = h;
+            }
+            else if (isDrawing)
+            {
+                Point p = e.GetPosition(drawingCanvas);
+                coordinatesText.Text = "X: " + (int)p.X + ", Y: " + (int)p.Y;
+                if (currentTool == Tool.Pencil && currentLine != null)
+                {
+                    points.Add(p);
+                    currentLine.Points = new PointCollection(points);
+                }
+                else if (currentTool == Tool.Eraser)
+                {
+                    RemoveAtPoint(p);
+                }
+                else UpdateShape(p);
+            }
         }
+
+        private void DrawingCanvas_MouseLeftButtonUp_ForSelection(object sender, MouseButtonEventArgs e)
+        {
+            if (isSelecting && selectionRect != null)
+            {
+                isSelecting = false;
+                // Сохраняем финальный выбранный прямоугольник
+                selectionRectangle = new Rect(Canvas.GetLeft(selectionRect), Canvas.GetTop(selectionRect), selectionRect.Width, selectionRect.Height);
+            }
+            else if (isDrawing)
+            {
+                PushUndo();
+                isDrawing = false;
+                currentLine = null; points.Clear(); currentShape = null;
+            }
+        }
+
+        // Выполнить обрезку по выбранной области
+        private void CropSelectedRegion()
+        {
+            if (selectionRect == null || selectionRectangle.Width == 0 || selectionRectangle.Height == 0)
+                return;
+
+            var bmp = GetCanvasBitmap();
+            int w = bmp.PixelWidth;
+            int h = bmp.PixelHeight;
+            int x = (int)selectionRectangle.X;
+            int y = (int)selectionRectangle.Y;
+            int width = (int)selectionRectangle.Width;
+            int height = (int)selectionRectangle.Height;
+
+            if (x < 0 || y < 0 || x + width > w || y + height > h)
+                return; // выходит за границы
+
+            // Вырезаем часть изображения
+            CroppedBitmap croppedBmp = new CroppedBitmap(bmp, new Int32Rect(x, y, width, height));
+            // Обновляем холст
+            drawingCanvas.Children.Clear();
+            Image img = new Image { Source = croppedBmp, Width = width, Height = height };
+            Canvas.SetLeft(img, 0);
+            Canvas.SetTop(img, 0);
+            drawingCanvas.Children.Add(img);
+            // Убираем выделение
+            if (selectionRect != null)
+            {
+                drawingCanvas.Children.Remove(selectionRect);
+                selectionRect = null;
+            }
+            PushUndo();
+        }
+
+        private void SelectButton_Click(object sender, RoutedEventArgs e)
+        {
+            currentTool = Tool.Select;
+            UpdateStatus();
+        }
+
+        private void CropButton_Click(object sender, RoutedEventArgs e)
+        {
+            CropSelectedRegion(); // этот метод должен быть реализован, см. примеры выше
+        }
+
+
+        // --- Остальные функции (рисование, слои, фильтры, сохранение) ---
 
         private void DrawingCanvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
-            undoStack.Push(GetCanvasBitmap());
             Point p = e.GetPosition(drawingCanvas);
             isDrawing = true;
             if (currentTool == Tool.Pencil)
@@ -85,8 +224,13 @@ namespace paint
                 currentLine = new Polyline { Stroke = new SolidColorBrush(currentColor), StrokeThickness = brushSize, StrokeLineJoin = PenLineJoin.Round };
                 points.Clear(); points.Add(p); currentLine.Points = new PointCollection(points); drawingCanvas.Children.Add(currentLine);
             }
-            else if (currentTool == Tool.Eraser) RemoveAtPoint(p);
-            else CreateShape(p);
+            else if (currentTool == Tool.Eraser)
+            {
+                RemoveAtPoint(p);
+                PushUndo();
+            }
+            else
+                CreateShape(p);
         }
 
         private void DrawingCanvas_MouseMove(object sender, MouseEventArgs e)
@@ -94,13 +238,25 @@ namespace paint
             Point p = e.GetPosition(drawingCanvas);
             coordinatesText.Text = "X: " + (int)p.X + ", Y: " + (int)p.Y;
             if (!isDrawing) return;
-            if (currentTool == Tool.Pencil && currentLine != null) { points.Add(p); currentLine.Points = new PointCollection(points); }
-            else if (currentTool == Tool.Eraser) RemoveAtPoint(p);
+            if (currentTool == Tool.Pencil && currentLine != null)
+            {
+                points.Add(p);
+                currentLine.Points = new PointCollection(points);
+            }
+            else if (currentTool == Tool.Eraser)
+            {
+                RemoveAtPoint(p);
+            }
             else UpdateShape(p);
         }
 
         private void DrawingCanvas_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
+            if (isDrawing)
+            {
+                PushUndo();
+                isDrawing = false;
+            }
             isDrawing = false;
             currentLine = null; points.Clear(); currentShape = null;
         }
@@ -121,7 +277,13 @@ namespace paint
                 currentShape = new Ellipse { Stroke = new SolidColorBrush(currentColor), StrokeThickness = brushSize };
                 Canvas.SetLeft(currentShape, start.X); Canvas.SetTop(currentShape, start.Y);
             }
-            drawingCanvas.Children.Add(currentShape);
+            else
+            {
+                currentShape = null; // явно!
+            }
+
+            if (currentShape != null)
+                drawingCanvas.Children.Add(currentShape);
         }
 
         private void UpdateShape(Point curr)
@@ -203,10 +365,11 @@ namespace paint
             brushSize = brushSizeSlider.Value;
             brushSizeText.Text = brushSize.ToString("0");
         }
-        private void ClearButton_Click(object sender, RoutedEventArgs e) 
+
+        private void ClearButton_Click(object sender, RoutedEventArgs e)
         {
-            undoStack.Push(GetCanvasBitmap());
             drawingCanvas.Children.Clear();
+            PushUndo();
         }
 
         private void SaveButton_Click(object sender, RoutedEventArgs e)
@@ -215,7 +378,7 @@ namespace paint
             if (dlg.ShowDialog() == true)
             {
                 int w = (int)drawingCanvas.ActualWidth, h = (int)drawingCanvas.ActualHeight;
-                drawingCanvas.Background = Brushes.White; // холст гарантированно белый
+                drawingCanvas.Background = Brushes.White;
                 RenderTargetBitmap bmp = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
                 bmp.Render(drawingCanvas);
                 BitmapEncoder encoder;
@@ -253,9 +416,9 @@ namespace paint
         private void ApplyFilteredToCanvas(Func<WriteableBitmap, WriteableBitmap> filterFunc, WriteableBitmap srcBitmap)
         {
             int w = srcBitmap.PixelWidth, h = srcBitmap.PixelHeight;
-            WriteableBitmap filtered = filterFunc(new WriteableBitmap(srcBitmap));
+            var filtered = filterFunc(new WriteableBitmap(srcBitmap));
             drawingCanvas.Children.Clear();
-            Image img = new Image() { Source = filtered, Width = w, Height = h };
+            Image img = new Image { Source = filtered, Width = w, Height = h };
             Canvas.SetLeft(img, 0);
             Canvas.SetTop(img, 0);
             drawingCanvas.Children.Add(img);
@@ -265,10 +428,12 @@ namespace paint
         {
             if (originalCanvasBitmap != null)
             {
-                int w = originalCanvasBitmap.PixelWidth, h = originalCanvasBitmap.PixelHeight;
+                int w = originalCanvasBitmap.PixelWidth;
+                int h = originalCanvasBitmap.PixelHeight;
                 drawingCanvas.Children.Clear();
-                Image img = new Image() { Source = originalCanvasBitmap, Width = w, Height = h };
-                Canvas.SetLeft(img, 0); Canvas.SetTop(img, 0);
+                Image img = new Image { Source = originalCanvasBitmap, Width = w, Height = h };
+                Canvas.SetLeft(img, 0);
+                Canvas.SetTop(img, 0);
                 drawingCanvas.Children.Add(img);
             }
         }
@@ -278,13 +443,15 @@ namespace paint
             if (!filterActive)
             {
                 originalCanvasBitmap = GetCanvasBitmap();
-                ApplyFilteredToCanvas(BrightnessFilter, originalCanvasBitmap); // или другой фильтр!
+                ApplyFilteredToCanvas(BrightnessFilter, originalCanvasBitmap);
                 filterActive = true;
+                PushUndo();
             }
             else
             {
                 RestoreOriginalCanvasBitmap();
                 filterActive = false;
+                PushUndo();
             }
         }
 
@@ -297,9 +464,9 @@ namespace paint
                 for (int x = 0; x < w; x++)
                 {
                     int i = y * stride + x * 4;
-                    pixels[i + 0] = (byte)Math.Min(pixels[i + 0] + 40, 255); // B
-                    pixels[i + 1] = (byte)Math.Min(pixels[i + 1] + 40, 255); // G
-                    pixels[i + 2] = (byte)Math.Min(pixels[i + 2] + 40, 255); // R
+                    pixels[i + 0] = (byte)Math.Min(pixels[i + 0] + 40, 255);
+                    pixels[i + 1] = (byte)Math.Min(pixels[i + 1] + 40, 255);
+                    pixels[i + 2] = (byte)Math.Min(pixels[i + 2] + 40, 255);
                 }
             wb.WritePixels(new Int32Rect(0, 0, w, h), pixels, stride, 0);
             return wb;
@@ -360,9 +527,9 @@ namespace paint
                             sum[2] += src[ni + 2];
                         }
                     int idx = y * stride + x * 4;
-                    dst[idx + 0] = (byte)(sum[0] / 9); // B
-                    dst[idx + 1] = (byte)(sum[1] / 9); // G
-                    dst[idx + 2] = (byte)(sum[2] / 9); // R
+                    dst[idx + 0] = (byte)(sum[0] / 9);
+                    dst[idx + 1] = (byte)(sum[1] / 9);
+                    dst[idx + 2] = (byte)(sum[2] / 9);
                 }
             wb.WritePixels(new Int32Rect(0, 0, w, h), dst, stride, 0);
             return wb;
@@ -380,37 +547,122 @@ namespace paint
                 originalCanvasBitmap = GetCanvasBitmap();
                 ApplyFilteredToCanvas(filter, originalCanvasBitmap);
                 filterActive = true;
+                PushUndo();
             }
             else
             {
                 RestoreOriginalCanvasBitmap();
                 filterActive = false;
+                PushUndo();
             }
         }
 
+        private void PushUndo()
+        {
+            var bmp = GetCanvasBitmap();
+            undoStack.Push(bmp);
+            redoStack.Clear();
+        }
+
+        // --- Горячие клавиши ---
         private void Window_KeyDown(object sender, KeyEventArgs e)
         {
-            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.Z)
+            if (Keyboard.Modifiers == ModifierKeys.Control)
             {
-                Undo();
+                switch (e.Key)
+                {
+                    case Key.Z:
+                        Undo(); e.Handled = true; break;
+                    case Key.Y:
+                        Redo(); e.Handled = true; break;
+                    case Key.S:
+                        SaveButton_Click(null, null); e.Handled = true; break;
+                    case Key.OemPlus:
+                    case Key.Add:
+                        brushSizeSlider.Value = Math.Min(brushSizeSlider.Maximum, brushSizeSlider.Value + 1);
+                        e.Handled = true; break;
+                    case Key.OemMinus:
+                    case Key.Subtract:
+                        brushSizeSlider.Value = Math.Max(brushSizeSlider.Minimum, brushSizeSlider.Value - 1);
+                        e.Handled = true; break;
+                    case Key.D1:
+                    case Key.NumPad1:
+                        currentTool = Tool.Pencil; UpdateStatus(); break;
+                    case Key.D2:
+                    case Key.NumPad2:
+                        currentTool = Tool.Line; UpdateStatus(); break;
+                    case Key.D3:
+                    case Key.NumPad3:
+                        currentTool = Tool.Rectangle; UpdateStatus(); break;
+                    case Key.D4:
+                    case Key.NumPad4:
+                        currentTool = Tool.Ellipse; UpdateStatus(); break;
+                    case Key.D5:
+                    case Key.NumPad5:
+                        currentTool = Tool.Eraser; UpdateStatus(); break;
+                }
+            }
+
+            // Обрезка по выделенной области (например, по Ctrl+R)
+            if (e.Key == Key.R && Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                CropSelectedRegion();
                 e.Handled = true;
             }
-            // Аналогично добавляйте другие комбинации
         }
-
-        private Stack<WriteableBitmap> undoStack = new Stack<WriteableBitmap>();
 
         private void Undo()
         {
-            if (undoStack.Count > 0)
+            if (undoStack.Count > 1)
             {
-                WriteableBitmap previous = undoStack.Pop();
-                int w = previous.PixelWidth, h = previous.PixelHeight;
-                drawingCanvas.Children.Clear();
-                var img = new Image { Source = previous, Width = w, Height = h };
-                Canvas.SetLeft(img, 0); Canvas.SetTop(img, 0);
-                drawingCanvas.Children.Add(img);
+                var current = undoStack.Pop();
+                redoStack.Push(current);
+                var previous = undoStack.Peek();
+                ApplyBitmapToCanvas(previous);
             }
+        }
+
+        private void Redo()
+        {
+            if (redoStack.Count > 0)
+            {
+                var next = redoStack.Pop();
+                undoStack.Push(next);
+                ApplyBitmapToCanvas(next);
+            }
+        }
+
+        private void ApplyBitmapToCanvas(WriteableBitmap bmp)
+        {
+            int w = bmp.PixelWidth, h = bmp.PixelHeight;
+            drawingCanvas.Children.Clear();
+            var img = new Image { Source = bmp, Width = w, Height = h };
+            Canvas.SetLeft(img, 0); Canvas.SetTop(img, 0);
+            drawingCanvas.Children.Add(img);
+        }
+
+        // Для ComboBox инструментов
+        private void ToolComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (toolComboBox.SelectedIndex >= 0)
+            {
+                currentTool = (Tool)toolComboBox.SelectedIndex;
+                UpdateStatus();
+            }
+        }
+
+        // Для выбора цвета мышкой
+        private void ColorRectangle_MouseDown(object sender, MouseButtonEventArgs e)
+        {
+            Rectangle r = sender as Rectangle;
+            if (r != null && r.Fill is SolidColorBrush)
+                currentColor = ((SolidColorBrush)r.Fill).Color;
+        }
+
+        // Для кнопки "Поворот"
+        private void RotateCanvas_Click(object sender, RoutedEventArgs e)
+        {
+            // Здесь можно вставить логику поворота холста, если она нужна, либо просто оставить метод пустым, чтобы не было ошибки.
         }
 
     }

@@ -65,6 +65,12 @@
                 <Button Content="Размытие" Click="ToggleBlur_Click"/>
             </Border>
 
+            <Border x:Name="selectButton" BorderBrush="Black" BorderThickness="1" Margin="40, 0, 0, 0">
+                <Button Content="Выделение" Click="SelectButton_Click"/>
+            </Border>
+            <Border x:Name="cropButton" BorderBrush="Black" BorderThickness="1" Margin="5, 0, 0, 0">
+                <Button Content="Обрезать" Click="CropButton_Click"/>
+            </Border>
 
         </ToolBar>
 
