@@ -77,6 +77,7 @@ namespace paint
 
         private void DrawingCanvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
+            undoStack.Push(GetCanvasBitmap());
             Point p = e.GetPosition(drawingCanvas);
             isDrawing = true;
             if (currentTool == Tool.Pencil)
@@ -202,7 +203,11 @@ namespace paint
             brushSize = brushSizeSlider.Value;
             brushSizeText.Text = brushSize.ToString("0");
         }
-        private void ClearButton_Click(object sender, RoutedEventArgs e) { drawingCanvas.Children.Clear(); }
+        private void ClearButton_Click(object sender, RoutedEventArgs e) 
+        {
+            undoStack.Push(GetCanvasBitmap());
+            drawingCanvas.Children.Clear();
+        }
 
         private void SaveButton_Click(object sender, RoutedEventArgs e)
         {
@@ -380,6 +385,31 @@ namespace paint
             {
                 RestoreOriginalCanvasBitmap();
                 filterActive = false;
+            }
+        }
+
+        private void Window_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.Z)
+            {
+                Undo();
+                e.Handled = true;
+            }
+            // Аналогично добавляйте другие комбинации
+        }
+
+        private Stack<WriteableBitmap> undoStack = new Stack<WriteableBitmap>();
+
+        private void Undo()
+        {
+            if (undoStack.Count > 0)
+            {
+                WriteableBitmap previous = undoStack.Pop();
+                int w = previous.PixelWidth, h = previous.PixelHeight;
+                drawingCanvas.Children.Clear();
+                var img = new Image { Source = previous, Width = w, Height = h };
+                Canvas.SetLeft(img, 0); Canvas.SetTop(img, 0);
+                drawingCanvas.Children.Add(img);
             }
         }
 
