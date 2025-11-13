@@ -72,6 +72,12 @@
                 <Button Content="Обрезать" Click="CropButton_Click"/>
             </Border>
 
+            <Border x:Name="loadImageButton" BorderBrush="Black" BorderThickness="1" Margin="40, 0, 0, 0">
+                <Button Content="Загрузить фото" Click="LoadImage_Click" />
+            </Border>
+
+
+
         </ToolBar>
 
         <Border Grid.Row="1" 

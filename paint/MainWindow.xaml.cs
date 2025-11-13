@@ -32,6 +32,7 @@ namespace paint
         private bool isSelecting = false;
         private Point selectionStartPoint;
         private Rect selectionRectangle;
+        private bool isSelectToolActive = false;
 
         public MainWindow()
         {
@@ -57,37 +58,22 @@ namespace paint
 
         private void DrawingCanvas_MouseLeftButtonDown_ForSelection(object sender, MouseButtonEventArgs e)
         {
-            selectionRect = new Rectangle
-            {
-                Stroke = Brushes.Blue,
-                StrokeThickness = 1,
-                Fill = new SolidColorBrush(Color.FromArgb(50, 0, 0, 255))
-            };
-
-            Rect selectionRectangle = new Rect(
-            Canvas.GetLeft(selectionRect),
-            Canvas.GetTop(selectionRect),
-            selectionRect.Width,
-            selectionRect.Height);
-
-            Canvas.SetLeft(selectionRect, selectionStartPoint.X);
-            Canvas.SetTop(selectionRect, selectionStartPoint.Y);
-            drawingCanvas.Children.Add(selectionRect);
-
             if (currentTool == Tool.Select)
             {
-                selectionStartPoint = e.GetPosition(drawingCanvas);
-                isSelecting = true;
-
                 if (selectionRect != null)
                 {
                     drawingCanvas.Children.Remove(selectionRect);
+                    selectionRect = null;
                 }
+
+                selectionStartPoint = e.GetPosition(drawingCanvas);
+                isSelecting = true;
 
                 selectionRect = new Rectangle
                 {
                     Stroke = Brushes.Black,
-                    StrokeThickness = 1
+                    StrokeThickness = 1,
+                    StrokeDashArray = new DoubleCollection(new double[] { 4, 2 })
                 };
                 Canvas.SetLeft(selectionRect, selectionStartPoint.X);
                 Canvas.SetTop(selectionRect, selectionStartPoint.Y);
@@ -112,6 +98,7 @@ namespace paint
                     CreateShape(p);
             }
         }
+
 
         private void DrawingCanvas_MouseMove_ForSelection(object sender, MouseEventArgs e)
         {
@@ -149,49 +136,92 @@ namespace paint
             if (isSelecting && selectionRect != null)
             {
                 isSelecting = false;
-                selectionRectangle = new Rect(Canvas.GetLeft(selectionRect), Canvas.GetTop(selectionRect), selectionRect.Width, selectionRect.Height);
+                
+                selectionRectangle = new Rect(
+                    Canvas.GetLeft(selectionRect),
+                    Canvas.GetTop(selectionRect),
+                    selectionRect.Width,
+                    selectionRect.Height
+                );
             }
             else if (isDrawing)
             {
                 PushUndo();
                 isDrawing = false;
-                currentLine = null; points.Clear(); currentShape = null;
+                currentLine = null;
+                points.Clear();
+                currentShape = null;
             }
         }
 
         private void CropSelectedRegion()
         {
-            if (selectionRect == null || selectionRectangle.Width == 0 || selectionRectangle.Height == 0)
+            if (selectionRect == null || selectionRectangle.Width <= 0 || selectionRectangle.Height <= 0)
+            {
+                MessageBox.Show("Сначала выделите область для обрезки", "Предупреждение", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
+            }
+
+            drawingCanvas.Children.Remove(selectionRect);
 
             var bmp = GetCanvasBitmap();
-            int w = bmp.PixelWidth;
-            int h = bmp.PixelHeight;
-            int x = (int)selectionRectangle.X;
-            int y = (int)selectionRectangle.Y;
-            int width = (int)selectionRectangle.Width;
-            int height = (int)selectionRectangle.Height;
 
-            if (x < 0 || y < 0 || x + width > w || y + height > h)
+            int x = Math.Max(0, (int)selectionRectangle.X);
+            int y = Math.Max(0, (int)selectionRectangle.Y);
+            int width = Math.Min((int)selectionRectangle.Width, bmp.PixelWidth - x);
+            int height = Math.Min((int)selectionRectangle.Height, bmp.PixelHeight - y);
+
+            if (width <= 0 || height <= 0 || x + width > bmp.PixelWidth || y + height > bmp.PixelHeight)
+            {
+                MessageBox.Show("Выделенная область выходит за границы изображения", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
+                selectionRect = null;
                 return;
+            }
 
             CroppedBitmap croppedBmp = new CroppedBitmap(bmp, new Int32Rect(x, y, width, height));
+
             drawingCanvas.Children.Clear();
-            Image img = new Image { Source = croppedBmp, Width = width, Height = height };
-            Canvas.SetLeft(img, 0);
-            Canvas.SetTop(img, 0);
-            drawingCanvas.Children.Add(img);
-            if (selectionRect != null)
+            Image img = new Image
             {
-                drawingCanvas.Children.Remove(selectionRect);
-                selectionRect = null;
-            }
+                Source = croppedBmp,
+                Width = width,
+                Height = height
+            };
+
+            double centerX = (drawingCanvas.ActualWidth - width) / 2;
+            double centerY = (drawingCanvas.ActualHeight - height) / 2;
+
+            Canvas.SetLeft(img, centerX);
+            Canvas.SetTop(img, centerY);
+            drawingCanvas.Children.Add(img);
+
+            selectionRect = null;
+            selectionRectangle = Rect.Empty;
+
             PushUndo();
         }
 
+
         private void SelectButton_Click(object sender, RoutedEventArgs e)
         {
-            currentTool = Tool.Select;
+            if (isSelectToolActive)
+            {
+                isSelectToolActive = false;
+                currentTool = Tool.Pencil; 
+
+                if (selectionRect != null)
+                {
+                    drawingCanvas.Children.Remove(selectionRect);
+                    selectionRect = null;
+                }
+
+            }
+            else
+            {
+                isSelectToolActive = true;
+                currentTool = Tool.Select;
+            }
+
             UpdateStatus();
         }
 
@@ -666,7 +696,6 @@ namespace paint
                 currentColor = ((SolidColorBrush)r.Fill).Color;
         }
 
-        // Для кнопки "Поворот"
         private void RotateCanvas_Click(object sender, RoutedEventArgs e)
         {
             canvasAngle = (canvasAngle + 90) % 360;
@@ -687,6 +716,54 @@ namespace paint
             tg.Children.Add(new ScaleTransform(scale, scale, w / 2, h / 2));
             tg.Children.Add(new RotateTransform(angle, w / 2, h / 2));
             return tg;
+        }
+
+        private void LoadImage_Click(object sender, RoutedEventArgs e)
+        {
+            OpenFileDialog dlg = new OpenFileDialog
+            {
+                Title = "Выберите изображение",
+                Filter = "Image Files|*.jpg;*.jpeg;*.png;*.bmp;*.gif|All Files|*.*",
+                DefaultExt = ".jpg"
+            };
+
+            if (dlg.ShowDialog() == true)
+            {
+                try
+                {
+                    BitmapImage bitmap = new BitmapImage();
+                    bitmap.BeginInit();
+                    bitmap.UriSource = new Uri(dlg.FileName);
+                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                    bitmap.EndInit();
+
+                    drawingCanvas.Children.Clear();
+
+                    Image img = new Image
+                    {
+                        Source = bitmap,
+                        Width = bitmap.PixelWidth,
+                        Height = bitmap.PixelHeight,
+                        Stretch = Stretch.Fill
+                    };
+
+                    double centerX = (drawingCanvas.ActualWidth - img.Width) / 2;
+                    double centerY = (drawingCanvas.ActualHeight - img.Height) / 2;
+
+                    Canvas.SetLeft(img, Math.Max(0, centerX));
+                    Canvas.SetTop(img, Math.Max(0, centerY));
+
+                    drawingCanvas.Children.Add(img);
+
+                    PushUndo();
+
+                    MessageBox.Show("Изображение успешно загружено!", "Успех", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Ошибка при загрузке изображения: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
         }
 
     }
